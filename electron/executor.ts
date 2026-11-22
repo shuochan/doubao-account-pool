@@ -1121,7 +1121,8 @@ async function findExactDoubaoActionPoint(win: BrowserWindow, label: string, all
         .map((el) => {
           const text = textOf(el);
           const normalized = compact(text);
-          const clickable = el.closest('button, [role="button"], a, [tabindex], [aria-label], [title]') || el;
+          const clickable = el.closest('button, [role="button"], a, [tabindex]:not([tabindex="-1"])');
+          if (!clickable) return null;
           const rect = clickable.getBoundingClientRect();
           const exact = normalized === targetText;
           const prefix = allowPrefix && normalized.startsWith(targetText)
@@ -1131,10 +1132,12 @@ async function findExactDoubaoActionPoint(win: BrowserWindow, label: string, all
             || /selected|active|checked/.test(String(clickable.className || "").toLowerCase());
           return { clickable, text, rect, exact, prefix, selected };
         })
+        .filter(Boolean)
         .filter((item) => item.exact || item.prefix)
         .filter((item, index, items) => items.findIndex((candidate) => candidate.clickable === item.clickable) === index)
         .sort((a, b) => Number(b.exact) - Number(a.exact)
           || Number(b.selected) - Number(a.selected)
+          || Number(b.clickable.matches('button, [role="button"], a')) - Number(a.clickable.matches('button, [role="button"], a'))
           || b.rect.bottom - a.rect.bottom
           || a.rect.width * a.rect.height - b.rect.width * b.rect.height);
       const target = candidates[0];
