@@ -3,7 +3,7 @@
 ## 基础信息
 
 - 默认地址：`http://127.0.0.1:17888`
-- 当前接口版本：`0.1.77`
+- 当前接口版本：`0.1.78`
 - 默认认证：`Authorization: Bearer local-doubao-key`
 - 除 `/health` 外，其余接口均需要 Bearer Token。
 - 建议在“配置管理”中修改默认 API Key。
@@ -23,7 +23,7 @@ Authorization: Bearer <api-key>
 
 账号记录增加 `quotaDate`（北京时间账期）、`nextQuotaResetAt`（下一次零点的 UTC ISO 时间）、`runningTaskCount`、`queuedTaskCount` 和 `maxConcurrentTasks`；原字段保持兼容。单个账号默认最多 3 条任务同时准备和发送，总任务并发上限默认 5，已有配置值不改写。
 
-0.1.75 新增 `dailyQuotaExhausted`、`quotaExhaustedDate`、`quotaExhaustedReason` 和 `availableQuota`。豆包确认今日免费次数用完时，`availableQuota` 为 0，但 `quotaRemaining`、`quotaUsedToday` 仍保留真实本地账本，不伪造消费。退款、刷新、登录检测和重启不会清除当天标记；北京时间次日零点解除，不重置付费去水印次数。
+0.1.75 新增 `dailyQuotaExhausted`、`quotaExhaustedDate`、`quotaExhaustedReason` 和 `availableQuota`。豆包确认今日免费次数用完时，`availableQuota` 为 0，但 `quotaRemaining`、`quotaUsedToday` 仍保留真实本地账本，不伪造消费。退款、刷新、登录检测和重启不会清除当天标记；北京时间次日零点解除。
 
 0.1.76 的 Mini/Fast 本地单次消耗支持一位小数，最小仍为 1 点；余额、已用和任务扣点可能为小数。总每日额度仍为整数，原 API 字段及状态不变。每个任务保留预扣时的价格，换号和退款按该价格处理；可生成次数按每个账号可用点数向下取整，不能四舍五入成可生成任务。本地设置不是豆包官方计费承诺。
 
@@ -59,15 +59,15 @@ Content-Type: multipart/form-data
 | `callbackUrl` | 否 | 状态变化时接收 JSON 的回调地址 |
 | `source` | 否 | 请求来源名称 |
 
-生成请求固定执行最终 MP4 结果验证。去水印失败、平台不支持或没有取得可播放 MP4 时，任务状态为 `failed`。
+生成请求固定执行最终 MP4 结果验证。没有从豆包分享资源取得可播放 MP4，或完整下载和文件签名验证失败时，任务状态为 `failed`。
 
 有足够额度但达到并发上限时，请求仍可返回 `accepted` 并预扣额度进入队列。每条任务的准备、发送和受理等待独立进行，不因同账号前一条尚未受理而串行阻塞。若豆包明确限制并发，保留原文并等待已有任务结束，不绕过限制或无限催发。
 
-每天北京时间 00:00 自动切换本地每日账期；启动、唤醒和接收请求时补检查，同一天不重复补额。正式受理的任务保留原账期，未受理的排队任务进入新账期重新预扣；余额不足继续排队，不超扣。升级时未知账期初始化为升级当天并保留当前余额，不擅自补满。此机制不修改豆包服务端额度，也不重置第三方付费去水印次数。
+每天北京时间 00:00 自动切换本地每日账期；启动、唤醒和接收请求时补检查，同一天不重复补额。正式受理的任务保留原账期，未受理的排队任务进入新账期重新预扣；余额不足继续排队，不超扣。升级时未知账期初始化为升级当天并保留当前余额，不擅自补满。此机制不修改豆包服务端额度。
 
 自动分配的任务收到明确的每日次数耗尽拒绝、尚未正式受理时，可在同一个 `requestId` 下换号继续。回调先显示换号排队信息，不会先发 `failed` 再恢复运行；提示词、参考图、模型、画幅和回调地址不变，调用方无需重新提交。已发送但结果未明的任务不会因另一条任务的拒绝而换号；已正式受理的任务继续在原对话取结果。无其他可用账号或任务明确指定 `accountId` 时，直接失败并只退回尚持有的预扣。
 
-这类失败统一返回下列结构，不能与去水印服务的 `watermark / quota_exhausted` 混淆：
+这类失败统一返回下列结构，用于明确表示豆包平台自身的每日额度状态：
 
 ```json
 {
@@ -89,7 +89,7 @@ Content-Type: multipart/form-data
 - 有回调服务时传入 `callbackUrl`；没有回调服务时按 3 到 5 秒轮询 `GET /api/requests/:requestId`。
 - 画布必须按 `requestId` 更新原任务，即使多个任务的账号、标题或提示词相同，也不能合并判断。
 - `cleanVideoUrl` 只能是经过验证的可播放 MP4 地址；`outputVideoPath` 只能是已经存在的本地 `.mp4` 文件。
-- `doubao.com/chat/...`、`doubao.com/thread/...` 和分享页地址只用于账号池内部恢复、复制和去水印解析，不能写入 `cleanVideoUrl`。
+- `doubao.com/chat/...`、`doubao.com/thread/...` 和分享页地址只用于账号池内部恢复和提取原始视频，不能写入 `cleanVideoUrl`。
 - 本地账号分区、Cookie、SQLite、参考图、输出视频和 Token 不属于接口参数，也不会随 Git 发布。
 
 ## 查询任务状态
@@ -129,72 +129,26 @@ Authorization: Bearer <api-key>
 
 正在执行或排队的任务不能重复恢复。已记录准确源对话的任务固定在自己的对话中找结果，不按重复标题或相同提示词取其他任务的视频；源对话和内部分享地址分别保存，公开成功结果仍只包含已验证的 MP4。
 
-## 单独解析视频结果
-
-保存去水印地址或 Token 后，后续解析尝试读取最新配置，包括已经处于生成等待中的任务、结果恢复和独立解析，无需重启本地服务。已经发出的上游请求不会被撤回；有效 MP4 成功结果不因换配置而重复解析。失败时若发现配置已更新，在有限重试内切换；上限用完则返回 `watermark / configuration_changed`，可恢复已有结果，不重新生成视频。已结束的失败任务不会因保存配置而自动重跑。此机制不改变去水印协议，不代表任意第三方接口都兼容。
-
-### 查询最近的去水印用量
-
-```http
-GET /api/watermark/status
-Authorization: Bearer <api-key>
-```
-
-只读取本机缓存，不额外调用解析服务。`usage` 来自当前接口/Token 最近一次解析响应的 `data.usage`；没有数据时为 `null`。`usageUpdatedAt` 是余额同步时间，`checkedAt` 是最近一次解析检查时间，两者可能不同。更换 Token 后不沿用其它 Token 的余额。
-
-```json
-{
-  "configured": true,
-  "usage": { "totalLimit": 1000, "usedCount": 532, "remainingCount": 468 },
-  "usageUpdatedAt": "2026-10-19T09:00:00.000Z",
-  "checkedAt": "2026-10-19T09:00:00.000Z",
-  "error": null
-}
-```
-
-### 解析已有分享地址
-
-```http
-POST /api/watermark/parse
-Authorization: Bearer <api-key>
-Content-Type: application/json
-
-{
-  "url": "<supported-source-url>"
-}
-```
-
-成功时返回经过验证的 `cleanVideoUrl`；失败时返回 HTTP 422 和 `status: "failed"`。
-
-去水印服务存在短暂的资源准备延迟。程序会先验证返回地址确实是可播放 MP4，未就绪时使用短间隔重试；重试状态会按任务顺序异步通知回调，不会阻塞视频结果解析。
-
 ## 失败原因
 
-任务查询、回调和独立解析失败响应增加 `error`，原有 `status`、`message` 和视频字段保持兼容：
-
-```json
-{
-  "status": "failed",
-  "message": "去水印次数已耗尽",
-  "error": {
-    "stage": "watermark",
-    "code": "quota_exhausted",
-    "title": "去水印次数已耗尽",
-    "detail": "API Token调用次数已耗尽",
-    "suggestion": "补充去水印次数后恢复结果，无需重新生成视频。",
-    "retryable": false
-  },
-  "cleanVideoUrl": null
-}
-```
-
-`stage` 包括 `account`、`submission`、`generation`、`sharing`、`watermark`、`output` 和 `unknown`。去水印分类包括 `quota_exhausted`、`token_missing`、`token_invalid`、`token_disabled`、`access_denied`、`rate_limited`、`resource_pending`、`network_error`、`unsupported_platform` 和 `invalid_video`。仅明确返回次数不足时才使用 `quota_exhausted`；不明确的 HTTP 403 使用 `access_denied`。
-
-`retryable` 表示当前故障是否适合自动短暂重试，不表示视频要重新生成。已有视频的去水印次数不足时，应先补充额度，再调用原任务的 `retry-result`。
+任务查询和回调失败响应包含 `error`，用于区分账号、提交、豆包生成、复制分享和文件输出问题。恢复已有结果只重新查找本任务的视频，不会再次提交生成。
 
 ## 成功语义
 
 外部接口不会把豆包分享页、聊天页或 thread 页面地址当作视频结果。只有满足以下任一条件才返回 `status: "success"`：
 
-- `cleanVideoUrl` 是经过验证、可访问的 MP4 视频地址。
-- `outputVideoPath` 是已经保存成功的本地 `.mp4` 文件路径。
+- `cleanVideoUrl` 是经过验证、可访问的 MP4 视频地址。若结果保存在本机，查询接口会根据当前请求 Host 返回受认证的局域网下载地址。
+- `videoDownloadUrl` 是同一真实 MP4 的下载/播放地址；本地结果使用 `GET /api/requests/:requestId/video`，必须携带 Bearer Token，并支持 HTTP Range。
+- `outputVideoPath` 是已经保存成功的本地 `.mp4` 文件路径，只供 Windows 本机诊断，不应交给局域网调用方。
+
+## 下载或播放已验证视频
+
+```http
+GET /api/requests/:requestId/video
+Authorization: Bearer <api-key>
+Range: bytes=0-
+```
+
+只有任务已经取得、验证并保存真实 MP4 时才返回视频。接口支持 `200` 和分段播放所需的 `206 Partial Content`；尚无有效视频时返回 `404`。局域网调用方应优先使用任务响应中的 `videoDownloadUrl`，不要读取 Windows `outputVideoPath`。
+
+0.1.78 起，程序只从豆包已验证的分享资源提取原始 MP4，不调用第三方去水印或解析服务。是否带水印由豆包端生成设置决定。

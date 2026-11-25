@@ -8,7 +8,8 @@ const actualReply = '今日视频生成免费次数用完了，你明天再来�
 test('recognizes the actual exhausted reply and supported daily free quota variants', () => {
   for (const text of [actualReply, '今日视频生成免费次数已用完。', '今日免费生成次数已用完，明天再来吧。',
     '今日生成次数已用完。', '免费生成次数已用完，请明天再试。', '今天的视频生成免费次数已经用完',
-    '今日视频生成免费次数用完，生成额度未扣除。', '今天的视频生成免费次数已耗尽，明天再试。']) {
+    '今日视频生成免费次数用完，生成额度未扣除。', '今天的视频生成免费次数已耗尽，明天再试。',
+    '今日视频生成免费额度已用完。开通订阅畅享更多额度。']) {
     assert.equal(isDoubaoDailyQuotaExhausted(text), true, text)
     assert.equal(isDoubaoDailyQuotaExhausted(extractDoubaoFailureMessage(text)), true, 'DOM extraction: ' + text)
   }

@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { BrowserWindow, clipboard } from "electron";
+import { app, BrowserWindow, clipboard } from "electron";
 import { AssignmentChangedError, type AppDatabase } from "./database.js";
 import { isDoubaoDailyQuotaExhausted } from "./doubao-quota-state.js";
 import { AccountTaskScheduler } from "./account-scheduler.js";
@@ -32,14 +32,14 @@ import {
   isGenerationReadyForShare,
   isFormalDoubaoConversationUrl,
   isQuotaNotChargedFailure,
-  normalizeComparableText
+  normalizeComparableText,
+  extractPromptDuration
 } from "./doubao-page-state.js";
 import { toPublicApiRequest } from "./public-api.js";
-import { confirmationDelayRemaining, hasFormalGenerationAcknowledgement, hasNewFormalGenerationAcknowledgement, shouldAttemptShareRecovery, recoveryCandidatesForTask } from "./generation-policy.js";
+import { confirmationDelayRemaining, hasFormalGenerationAcknowledgement, hasNewFormalGenerationAcknowledgement, isActiveResponseSignal, shouldAttemptShareRecovery, recoveryCandidatesForTask } from "./generation-policy.js";
 import { diagnoseRequest } from "./request-diagnostics.js";
 import type { Account, ApiRequest, ApiRequestStatus, AppSettings, DoubaoAspectRatio, DoubaoModel, RequestErrorInfo } from "./types.js";
-import { resolveCleanVideoUrl, verifyDoubaoShareVideoResource, WatermarkError } from "./watermark.js";
-import type { WatermarkProviderObserver } from "./watermark-state.js";
+import { isKnownWatermarkedDoubaoVideoUrl, resolveDoubaoDirectVideoUrl, verifyDoubaoShareVideoResource, verifyPlayableVideoUrl } from "./watermark.js";
 
 type DataChangedCallback = () => void;
 type QueueItem = {
@@ -115,8 +115,7 @@ export class DoubaoExecutor {
 
   constructor(
     private readonly database: AppDatabase,
-    private readonly onDataChanged: DataChangedCallback,
-    private readonly onWatermarkResponse?: WatermarkProviderObserver
+    private readonly onDataChanged: DataChangedCallback
   ) {
     this.scheduler = new AccountTaskScheduler(
       () => this.database.getSettings().maxConcurrentAccounts,
@@ -240,12 +239,10 @@ export class DoubaoExecutor {
       });
       this.database.updateAccount({ id: account.id, currentStatus: "busy" });
 
-      const savedShare = request.error?.stage === "watermark"
-        ? extractDoubaoWatermarkShareUrl(request.doubaoThreadUrl)
-        : null;
+      const savedShare = extractDoubaoWatermarkShareUrl(request.doubaoThreadUrl);
       let recovery: ShareRecoveryResult;
       if (savedShare) {
-        await progress({ requestId, status: "running", message: "正在重试已保存视频分享地址的去水印解析" });
+        await progress({ requestId, status: "running", message: "正在从已保存的豆包分享地址恢复原始 MP4" });
         recovery = { shareUrl: savedShare, candidateCount: 0, promptMatchCount: 0, generatedMatchCount: 1, pendingMatchCount: 0, failureMessage: null, shareFailureReason: null };
       } else {
         win = this.createExecutionWindow(account, settings, requestId);
@@ -288,12 +285,11 @@ export class DoubaoExecutor {
         request,
         "复制分享地址",
         "success",
-        "已复制豆包 thread/share 地址，等待去水印接口验证真实 MP4",
+        "已复制豆包 thread/share 地址，正在验证豆包原始 MP4",
         recovery.shareUrl
       );
       const resolvedVideo = await this.resolveCleanVideoForVerifiedShare(
         request,
-        settings,
         recovery.shareUrl
       );
       const shareUrl = resolvedVideo.shareUrl;
@@ -304,8 +300,8 @@ export class DoubaoExecutor {
         requestId,
         status: "success",
         message: outputVideoPath
-          ? `已恢复结果，去水印 MP4 已验证并保存到本地（${formatWatermarkResolution(cleanVideo)}）`
-          : `已恢复结果，去水印 MP4 地址已验证（${formatWatermarkResolution(cleanVideo)}）`,
+          ? `已恢复豆包原始 MP4 并保存到本地（${formatVideoResolution(cleanVideo)}）`
+          : `已恢复豆包原始 MP4（${formatVideoResolution(cleanVideo)}）`,
         doubaoThreadUrl: shareUrl,
         rawVideoUrl: null,
         cleanVideoUrl,
@@ -319,7 +315,7 @@ export class DoubaoExecutor {
         return;
       }
       const message = errorMessage(error);
-      await this.failRequest(request, `恢复结果失败：${message}`, false, error instanceof WatermarkError ? error.info : undefined);
+      await this.failRequest(request, `恢复结果失败：${message}`, false);
       this.database.updateAccount({
         id: account.id,
         currentStatus: /未登录|登录/.test(message) ? "login_required" : "idle"
@@ -529,7 +525,7 @@ export class DoubaoExecutor {
 
       if (!generationResult.shareUrl) {
         throw new Error(
-          `视频已生成，但未提取到豆包分享链接，无法获取去水印视频${generationResult.shareFailureReason ? `（${generationResult.shareFailureReason}）` : ""}`
+          `视频已生成，但未提取到豆包分享链接，无法获取原始 MP4${generationResult.shareFailureReason ? `（${generationResult.shareFailureReason}）` : ""}`
         );
       }
 
@@ -537,31 +533,27 @@ export class DoubaoExecutor {
         request,
         "复制分享地址",
         "success",
-        "已复制豆包 thread/share 地址，等待去水印接口验证真实 MP4",
+        "已复制豆包 thread/share 地址，正在验证豆包原始 MP4",
         generationResult.shareUrl
       );
 
-      if (!request.removeWatermark) {
-        throw new Error("接口仅返回去水印视频，本次请求未启用去水印");
-      }
-
       const resolvedVideo = await this.resolveCleanVideoForVerifiedShare(
         request,
-        settings,
-        generationResult.shareUrl
+        generationResult.shareUrl,
+        generationResult.directVideoUrl
       );
       const doubaoThreadUrl = resolvedVideo.shareUrl;
       const cleanVideo = resolvedVideo.cleanVideo;
       const cleanVideoUrl = cleanVideo.url;
-      if (settings.outputDir) await progress({ requestId, status: "running", executionPhase: "output", message: "正在保存已验证的去水印 MP4" });
+      await progress({ requestId, status: "running", executionPhase: "output", message: "正在保存已验证的豆包原始 MP4" });
       const outputVideoPath = await downloadCleanVideoIfNeeded(settings, requestId, cleanVideoUrl);
 
       await progress({
         requestId,
         status: "success",
         message: outputVideoPath
-          ? `视频生成完成，去水印 MP4 已验证并保存到本地（${formatWatermarkResolution(cleanVideo)}）`
-          : `视频生成完成，去水印 MP4 地址已验证（${formatWatermarkResolution(cleanVideo)}）`,
+          ? `视频生成完成，豆包原始 MP4 已验证并保存到本地（${formatVideoResolution(cleanVideo)}）`
+          : `视频生成完成，豆包原始 MP4 已验证（${formatVideoResolution(cleanVideo)}）`,
         doubaoThreadUrl,
         rawVideoUrl: null,
         cleanVideoUrl,
@@ -610,7 +602,7 @@ export class DoubaoExecutor {
       if (shouldRefundQuota) {
         this.database.refundApiRequestQuota(requestId, request.assignmentRevision);
       }
-      await this.failRequest(request, errorMessage(error), shouldRefundQuota, error instanceof WatermarkError ? error.info : undefined);
+      await this.failRequest(request, errorMessage(error), shouldRefundQuota);
       this.database.updateAccount({
         id: account.id,
         currentStatus: keepWindowOpen ? "login_required" : "idle"
@@ -686,72 +678,62 @@ export class DoubaoExecutor {
     this.onDataChanged();
   }
 
-  private resolveCleanVideoWithProgress(
-    request: ApiRequest,
-    settings: AppSettings,
-    shareUrl: string,
-    maxAttempts?: number
-  ) {
-    return (async () => {
-      const { requestId, assignmentRevision } = request;
-      const startedAt = Date.now();
-      let retryCount = 0;
-      await this.updateProgress({
-        requestId,
-        assignmentRevision,
-        status: "running",
-        message: "正在请求去水印服务并验证真实 MP4 地址"
-      });
-
-      try {
-        const url = await resolveCleanVideoUrl(settings, shareUrl, async (retry) => {
-          retryCount = retry.nextAttempt - 1;
-          const delaySeconds = Math.ceil(retry.delayMs / 1000);
-          const elapsedSeconds = Math.max(1, Math.ceil(retry.elapsedMs / 1000));
-          await this.updateProgress({
-            requestId,
-            assignmentRevision,
-            status: "running",
-            message: retry.configurationChanged
-              ? "检测到去水印配置已更新，正在使用已保存的新配置重新解析现有视频"
-              : `去水印第 ${retry.failedAttempt} 次未拿到可播放 MP4，已耗时 ${elapsedSeconds} 秒；${delaySeconds} 秒后进行第 ${retry.nextAttempt}/${retry.maxAttempts} 次解析：${retry.error}`
-          });
-        }, { maxAttempts, onProviderResponse: this.onWatermarkResponse, getSettings: () => this.database.getSettings() });
-        return { url, elapsedMs: Date.now() - startedAt, retryCount };
-      } catch (error) {
-        const elapsedSeconds = Math.max(1, Math.ceil((Date.now() - startedAt) / 1000));
-        const message = `${errorMessage(error)}（去水印已耗时 ${elapsedSeconds} 秒，已重试 ${retryCount} 次）`;
-        if (error instanceof WatermarkError) throw new WatermarkError(error.info, message);
-        throw new Error(message);
-      }
-    })();
-  }
-
   private async resolveCleanVideoForVerifiedShare(
     request: ApiRequest,
-    settings: AppSettings,
-    shareUrl: string
+    shareUrl: string,
+    preferredDirectVideoUrl?: string | null
   ) {
     await this.updateProgress({
       requestId: request.requestId,
       assignmentRevision: request.assignmentRevision,
       status: "running",
-      message: "已取得当前视频分享地址，正在请求去水印服务",
-      executionPhase: "watermark",
+      message: "已取得当前视频分享地址，正在优先提取豆包原始 MP4",
+      executionPhase: "output",
       doubaoThreadUrl: shareUrl
     });
 
-    try {
-      const cleanVideo = await this.resolveCleanVideoWithProgress(
-        request,
-        settings,
-        shareUrl
-      );
-      return { shareUrl, cleanVideo };
-    } catch (error) {
-      if (error instanceof WatermarkError) throw error;
-      throw new Error(`分享链接已确认包含视频资源，但去水印服务未识别：${errorMessage(error)}`);
+    const startedAt = Date.now();
+    if (preferredDirectVideoUrl) {
+      try {
+        if (isKnownWatermarkedDoubaoVideoUrl(preferredDirectVideoUrl)) {
+          throw new Error("生成页面捕获到的是带水印视频资源");
+        }
+        await verifyPlayableVideoUrl(preferredDirectVideoUrl);
+        this.recordOperation(request, "提取原始视频", "success", "已验证生成页面捕获的豆包 MP4", preferredDirectVideoUrl);
+        return {
+          shareUrl,
+          cleanVideo: { url: preferredDirectVideoUrl, elapsedMs: Date.now() - startedAt, retryCount: 0, source: "doubao" as const }
+        };
+      } catch (error) {
+        this.recordOperation(request, "验证页面视频", "info", `生成页面 MP4 不可用，改从分享页恢复：${errorMessage(error)}`);
+      }
     }
+    const retryDelays = [0, 5000, 15000, 30000, 60000];
+    let lastError: unknown;
+    for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
+      if (retryDelays[attempt]) {
+        await this.updateProgress({
+          requestId: request.requestId,
+          assignmentRevision: request.assignmentRevision,
+          status: "running",
+          executionPhase: "output",
+          message: `豆包分享页正在同步 MP4，${retryDelays[attempt] / 1000} 秒后仅重试取回结果（不会重新生成）`,
+          doubaoThreadUrl: shareUrl
+        });
+        await wait(retryDelays[attempt]);
+      }
+      try {
+        const directUrl = await resolveDoubaoDirectVideoUrl(shareUrl);
+        this.recordOperation(request, "提取原始视频", "success", "已验证豆包原始 MP4", directUrl);
+        return {
+          shareUrl,
+          cleanVideo: { url: directUrl, elapsedMs: Date.now() - startedAt, retryCount: attempt, source: "doubao" as const }
+        };
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw new Error(`分享链接已确认包含视频资源，但未能取得豆包原始 MP4：${errorMessage(lastError)}`);
   }
 
   private async failRequest(request: ApiRequest, message: string, refunded: boolean, error?: RequestErrorInfo) {
@@ -1047,7 +1029,7 @@ async function activateVideoMode(win: BrowserWindow, model: DoubaoModel) {
     }
 
     if (!current.currentModel) {
-      const videoMode = await findExactDoubaoActionPoint(win, "视频生成", true);
+      const videoMode = await waitForExactDoubaoActionPoint(win, "视频生成", true, 4500);
       if (videoMode) {
         await sendMouseClick(win, videoMode.x, videoMode.y);
         diagnostics.push(`第 ${attempt} 次点击视频入口 ${videoMode.debug}`);
@@ -1793,7 +1775,7 @@ async function awaitGenerationStart(
     if (isDoubaoCongestionReply(state.responseMessage)) throw new DoubaoCongestionError(state.responseMessage || "豆包繁忙");
     const now = Date.now();
     const reply = state.responseMessage || "";
-    if (reply !== lastReply || state.responding) {
+    if (reply !== lastReply) {
       stableSince = now;
       lastReply = reply;
     }
@@ -1804,12 +1786,15 @@ async function awaitGenerationStart(
       stableSince = now;
       await onProgress("检测到对话中新增确认生成指令，继续等待任务启动");
     }
-    const remaining = confirmationDelayRemaining({ now, stableSince, lastConfirmationAt, confirmationCount: confirmations, accepted: false, responding: state.responding, hasDraft: state.hasDraft });
+    const activelyResponding = isActiveResponseSignal(state.responding, now, stableSince);
+    const remaining = confirmationDelayRemaining({ now, stableSince, lastConfirmationAt, confirmationCount: confirmations, accepted: false, responding: activelyResponding, hasDraft: state.hasDraft });
     if (remaining === 0 && canSend()) {
       // Inspect again immediately before writing so manual input and late
       // acceptance observed during the delay cannot trigger a duplicate send.
       const checked = await waitForSubmissionStarted(win, model, baselineText, prompt, 1);
-      if (checked.confirmed || checked.pending || checked.responding || checked.hasDraft || checked.confirmationCount > observedConfirmations) {
+      const checkedReply = checked.responseMessage || "";
+      const checkedActivelyResponding = isActiveResponseSignal(checked.responding, Date.now(), stableSince);
+      if (checked.confirmed || checked.pending || checkedReply !== lastReply || checkedActivelyResponding || checked.hasDraft || checked.confirmationCount > observedConfirmations) {
         state = checked;
         continue;
       }
@@ -1828,15 +1813,15 @@ async function awaitGenerationStart(
       await onProgress(`尚未确认视频启动，已补发“确认生成”，第 ${Math.min(confirmations, 2)}/2 次`);
     } else if (now - lastProgressAt > 15000) {
       lastProgressAt = now;
-      await onProgress(!canSend() ? "账号今日次数已用完，继续检查本任务受理状态，不再补发生成指令" : state.responding ? "豆包正在回复，等待回复结束后确认视频任务" : remaining === null
+      await onProgress(!canSend() ? "账号今日次数已用完，继续检查本任务受理状态，不再补发生成指令" : activelyResponding ? "豆包正在回复，等待回复结束后确认视频任务" : remaining === null
         ? "尚未确认视频启动，等待本次确认回复"
         : `尚未确认视频启动，${Math.ceil(remaining / 1000)} 秒后补发“确认生成”`);
     }
-    if (confirmations >= 2 && !state.responding && !state.hasDraft && now - Math.max(lastConfirmationAt, stableSince) >= 120000) break;
+    if (confirmations >= 2 && !activelyResponding && !state.hasDraft && now - Math.max(lastConfirmationAt, stableSince) >= 120000) break;
     state = await waitForSubmissionStarted(win, model, baselineText, prompt, 3000);
   }
   if (!canSend()) throw new DoubaoGenerationPendingError("账号今日次数已用完；本任务已发送但受理尚不明确，停止重发并保留原对话");
-  if (state.responding || state.hasDraft) {
+  if (isActiveResponseSignal(state.responding, Date.now(), stableSince) || state.hasDraft) {
     throw new DoubaoGenerationPendingError("尚未确认视频启动，页面仍在回复或存在手动输入；已暂停自动补发");
   }
   throw new DoubaoPageFailureError(`已等待并补发确认指令，但尚未确认视频启动；页面最新回复：${state.responseMessage || "未取得新的回复"}`, true);
@@ -2573,7 +2558,15 @@ async function inspectGenerationPage(win: BrowserWindow, scrollToLatest = true) 
         ...Array.from(video.querySelectorAll("source[src]")).map((source) => source.src)
       ].filter(Boolean));
       const videoSources = videoSourceLists.flat();
-      const videoUrls = videoSources.filter((value) => /^https?:\\/\\//i.test(value || ""));
+      const performanceVideoUrls = performance.getEntriesByType("resource")
+        .map((entry) => entry.name)
+        .filter((value) => /^https?:\\/\\//i.test(value || "") && /video[_-]|video.*watermark|video_dsz|\\.mp4(?:[?#]|$)|video_mp4/i.test(value));
+      const videoUrls = Array.from(new Set([...videoSources, ...performanceVideoUrls]))
+        .filter((value) => /^https?:\\/\\//i.test(value || ""));
+      const preferredVideoUrl = videoUrls.find((value) => /video[_-]pre[_-]watermark|pre[_-]watermark|original[_-]video/i.test(value))
+        || videoUrls.find((value) => !/(?:^|[_-])watermark(?:[_-]|$)|video_dsz_watermark/i.test(value))
+        || videoUrls[videoUrls.length - 1]
+        || null;
       const completedByText = isDoubaoGenerationComplete(pageText);
       const promptRewrite = isDoubaoPromptRewritePage(pageText);
       const playableVideoCount = videos.filter((video, index) => (
@@ -2586,7 +2579,7 @@ async function inspectGenerationPage(win: BrowserWindow, scrollToLatest = true) 
         failed: Boolean(failureMessage),
         failureMessage,
         pageText,
-        directVideoUrl: videoUrls[videoUrls.length - 1] || null,
+        directVideoUrl: preferredVideoUrl,
         videoUrls,
         visibleVideoCount: videos.length,
         playableVideoCount,
@@ -3091,9 +3084,9 @@ async function getPageShareLinkFailureReason(win: BrowserWindow) {
     (() => window.__doubaoShareCapture || null)()
   `).catch(() => null);
   if (state?.sawChatUrl) {
-    return "豆包复制的是 chat 对话地址，不是可去水印的 thread/share 分享地址";
+    return "豆包复制的是 chat 对话地址，不是包含视频资源的 thread/share 分享地址";
   }
-  return "点击复制链接后页面未捕获到可去水印的豆包 thread/share 分享地址";
+  return "点击复制链接后页面未捕获到包含视频资源的豆包 thread/share 分享地址";
 }
 
 async function primeGeneratedVideoCard(win: BrowserWindow) {
@@ -3703,11 +3696,11 @@ async function clickByKeywords(win: BrowserWindow, keywords: string[]) {
 }
 
 async function downloadCleanVideoIfNeeded(settings: AppSettings, requestId: string, cleanVideoUrl: string) {
-  if (!settings.outputDir.trim()) return null;
-  await fs.mkdir(settings.outputDir, { recursive: true });
+  const outputDir = settings.outputDir.trim() || path.join(app.getPath("userData"), "videos");
+  await fs.mkdir(outputDir, { recursive: true });
   const response = await fetch(cleanVideoUrl);
   if (!response.ok) {
-    throw new Error(`下载去水印视频失败：HTTP ${response.status}`);
+    throw new Error(`下载豆包原始视频失败：HTTP ${response.status}`);
   }
 
   const contentType = (response.headers.get("content-type") || "").toLowerCase();
@@ -3715,13 +3708,33 @@ async function downloadCleanVideoIfNeeded(settings: AppSettings, requestId: stri
     throw new Error(`下载结果不是视频文件：Content-Type ${contentType || "unknown"}`);
   }
 
-  const outputPath = path.join(settings.outputDir, `${requestId}.mp4`);
+  const outputPath = path.join(outputDir, `${requestId}.mp4`);
   const bytes = Buffer.from(await response.arrayBuffer());
-  if (!bytes.length) {
-    throw new Error("下载到的去水印 MP4 文件为空");
+  if (!looksLikeMp4(bytes)) {
+    throw new Error("下载结果没有通过 MP4 文件签名验证");
   }
   await fs.writeFile(outputPath, bytes);
   return outputPath;
+}
+
+async function waitForExactDoubaoActionPoint(
+  win: BrowserWindow,
+  label: string,
+  allowPrefix = false,
+  timeoutMs = 4500
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const point = await findExactDoubaoActionPoint(win, label, allowPrefix).catch(() => null);
+    if (point) return point;
+    await wait(300);
+  }
+  return null;
+}
+
+function looksLikeMp4(bytes: Buffer) {
+  if (bytes.length < 12) return false;
+  return bytes.subarray(4, 12).includes(Buffer.from("ftyp"));
 }
 
 function postCallback(request: ApiRequest) {
@@ -3765,20 +3778,6 @@ function formatGenerationSettings(request: Pick<ApiRequest, "model" | "aspectRat
   return `模型：${doubaoVideoModelLabel(model)} 画幅：${request.aspectRatio || "未指定"} 时长：${extractPromptDuration(request.prompt) || "未指定"}`;
 }
 
-function extractPromptDuration(prompt: string) {
-  const text = prompt.replace(/\s+/g, " ");
-  const explicit = text.match(/(?:总?时长|视频时长|持续时间)\s*[:：]?\s*(\d+(?:\s*[-—–~至]\s*\d+)?)\s*(?:秒|s)(?![a-z])/i);
-  if (explicit?.[1]) return `${explicit[1].replace(/\s+/g, "")}秒`;
-
-  // Prompts often contain segment timings such as "留 1 秒" and put the
-  // actual total duration at the end. Prefer the final complete duration
-  // marker when there is no explicit duration label.
-  const durations = Array.from(text.matchAll(/(?<!\d)(\d+(?:\s*[-—–~至]\s*\d+)?)\s*(?:秒|s)(?![a-z])/gi));
-  const last = durations.at(-1);
-  if (last?.[1]) return `${last[1].replace(/\s+/g, "")}秒`;
-  return null;
-}
-
 function operationAction(message: string, status?: ApiRequestStatus) {
   if (status === "success") return "任务完成";
   if (status === "failed") return "任务失败";
@@ -3787,7 +3786,7 @@ function operationAction(message: string, status?: ApiRequestStatus) {
   if (message.includes("切换豆包视频生成模式")) return "切换视频生成模式";
   if (message.includes("提交豆包")) return "提交视频任务";
   if (message.includes("复制分享")) return "复制分享地址";
-  if (message.includes("去水印")) return "去水印解析";
+  if (message.includes("原始 MP4") || message.includes("视频地址")) return "验证视频资源";
   if (message.includes("等待视频") || message.includes("定位豆包")) return "等待视频结果";
   return "任务进度";
 }
@@ -3797,8 +3796,8 @@ function formatElapsed(milliseconds: number) {
   return `${seconds} 秒`;
 }
 
-function formatWatermarkResolution(input: { elapsedMs: number; retryCount: number }) {
-  return `耗时 ${formatElapsed(input.elapsedMs)}，第 ${input.retryCount + 1} 次解析`;
+function formatVideoResolution(input: { elapsedMs: number }) {
+  return `豆包原始 MP4，耗时 ${formatElapsed(input.elapsedMs)}`;
 }
 
 function isRefundableExecutionError(error: unknown) {

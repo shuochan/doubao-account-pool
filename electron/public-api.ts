@@ -1,6 +1,12 @@
 import type { ApiRequest } from "./types.js";
 
-export function toPublicApiRequest(request: ApiRequest) {
+export function toPublicApiRequest(request: ApiRequest, apiBaseUrl?: string) {
+  const videoDownloadPath = request.outputVideoPath
+    ? `/api/requests/${encodeURIComponent(request.requestId)}/video`
+    : null;
+  const videoDownloadUrl = videoDownloadPath && apiBaseUrl
+    ? `${apiBaseUrl.replace(/\/$/, "")}${videoDownloadPath}`
+    : videoDownloadPath;
   return {
     requestId: request.requestId,
     status: request.status,
@@ -8,7 +14,8 @@ export function toPublicApiRequest(request: ApiRequest) {
     error: request.error,
     model: request.model,
     aspectRatio: request.aspectRatio,
-    cleanVideoUrl: request.cleanVideoUrl,
+    cleanVideoUrl: request.cleanVideoUrl || videoDownloadUrl,
+    videoDownloadUrl,
     outputVideoPath: request.outputVideoPath,
     quotaRefunded: request.quotaRefunded,
     createdAt: request.createdAt,

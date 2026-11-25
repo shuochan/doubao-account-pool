@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
@@ -10,7 +11,12 @@ test('daily provider exhaustion and atomic failover in isolated databases', asyn
   const line = result.stdout.split('\n').find(line => line.startsWith('EXHAUSTION_RESULTS '))
   assert.ok(line, result.stdout + result.stderr)
   const cases = JSON.parse(line.slice('EXHAUSTION_RESULTS '.length))
-  assert.equal(cases.length, 15)
-  for (const item of cases) await t.test(item.name, () => assert.equal(item.ok, true, item.error))
-  assert.equal(result.status, 0, result.stderr)
+  const profile = result.stdout.split('\n').find(line => line.startsWith('EXHAUSTION_PROFILE '))?.slice('EXHAUSTION_PROFILE '.length)
+  try {
+    assert.equal(cases.length, 16)
+    for (const item of cases) await t.test(item.name, () => assert.equal(item.ok, true, item.error))
+    assert.equal(result.status, 0, result.stderr)
+  } finally {
+    if (profile) fs.rmSync(profile, { recursive: true, force: true })
+  }
 })

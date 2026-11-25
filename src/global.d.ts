@@ -6,8 +6,7 @@ import type {
   AppSettings,
   AppSettingsUpdateInput,
   OperationLog,
-  RequestStats,
-  WatermarkStatus
+  RequestStats
 } from "../electron/types";
 
 declare global {
@@ -41,7 +40,6 @@ declare global {
         stats: (startIso: string, endIso: string) => Promise<RequestStats>;
         recover: (requestId: string) => Promise<boolean>;
       };
-      watermark: { status: () => Promise<WatermarkStatus> };
       operationLogs: {
         list: (limit?: number) => Promise<OperationLog[]>;
         clear: () => Promise<boolean>;

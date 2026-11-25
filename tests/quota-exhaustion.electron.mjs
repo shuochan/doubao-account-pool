@@ -60,6 +60,13 @@ app.whenReady().then(async () => {
     assert.equal(db.getAccount(a.id).quotaRemaining, 10); assert.equal(db.getAccount(b.id).quotaRemaining, 8)
     assert.equal(next.quotaRefunded, false); assert.equal(next.quotaReserved, true)
   })
+  scenario('scheduler prefers an account with a verified successful generation over an untested account', ({ db, a, reserve, enableB }) => {
+    const prior = reserve('verified-account', true)
+    db.updateApiRequest({ requestId: prior.requestId, status: 'success', cleanVideoUrl: 'https://example.invalid/verified.mp4' })
+    enableB()
+    const next = reserve('prefer-verified')
+    assert.equal(next.accountId, a.id)
+  })
   scenario('a fresh refusal just after midnight survives delayed local rollover', ({ db, a, b, reserve, enableB, sent, setDate }) => {
     reserve('midnight'); sent('midnight'); enableB()
     setDate('2026-10-20T16:00:01.000Z')
@@ -206,5 +213,6 @@ app.whenReady().then(async () => {
   } catch (error) { results.push({ name: 'real DOM quota refusal retries same ID through executor scheduler and ordered HTTP callbacks', ok: false, error: error.stack }) }
   finally { windows.forEach(win => { if (!win.isDestroyed()) win.destroy() }); await new Promise(resolve => server.close(resolve)); db.close() }
   console.log('EXHAUSTION_RESULTS ' + JSON.stringify(results))
-  fs.rmSync(root, { recursive: true, force: true }); app.exit(results.every(item => item.ok) ? 0 : 1)
+  console.log('EXHAUSTION_PROFILE ' + root)
+  app.exit(results.every(item => item.ok) ? 0 : 1)
 }).catch(error => { console.error(error); app.exit(1) })

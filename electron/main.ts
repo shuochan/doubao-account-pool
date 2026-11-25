@@ -1,4 +1,5 @@
 import http, { type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -20,8 +21,6 @@ import type {
   DoubaoModel,
   GenerateRequestBody
 } from "./types.js";
-import { resolveCleanVideoUrl, WatermarkError } from "./watermark.js";
-import type { WatermarkProviderObserver } from "./watermark-state.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,11 +30,6 @@ let db: AppDatabase;
 let executor: DoubaoExecutor;
 let apiServer: LocalApiServer;
 let quotaTimer: DailyQuotaTimer | null = null;
-
-const observeWatermarkResponse: WatermarkProviderObserver = (settings, event) => {
-  db.recordWatermarkResponse(settings, event);
-  notifyDataChanged();
-};
 
 const isDev = Boolean(process.env.VITE_DEV_SERVER_URL);
 
@@ -144,11 +138,6 @@ class LocalApiServer {
         return;
       }
 
-      if (request.method === "GET" && requestUrl.pathname === "/api/watermark/status") {
-        sendJson(response, 200, this.database.getWatermarkStatus());
-        return;
-      }
-
       if (request.method === "POST" && requestUrl.pathname === "/api/generate") {
         const requestId = `doubao-${randomUUID().replaceAll("-", "").slice(0, 16)}`;
         const body = await readGenerateRequest(request, requestId);
@@ -207,7 +196,7 @@ class LocalApiServer {
           notifyDataChanged();
           const finalFailure = this.database.getApiRequest(requestId)!;
           void postCallback(finalFailure);
-          sendJson(response, 409, toPublicApiRequest(finalFailure));
+          sendJson(response, 409, toPublicApiRequest(finalFailure, requestBaseUrl(request)));
           return;
         }
 
@@ -221,7 +210,7 @@ class LocalApiServer {
         });
         notifyDataChanged();
         void postCallback(created);
-        sendJson(response, 202, toPublicApiRequest(created));
+        sendJson(response, 202, toPublicApiRequest(created, requestBaseUrl(request)));
         return;
       }
 
@@ -263,12 +252,24 @@ class LocalApiServer {
         const result = this.requestExecutor.stop(requestId);
         if (!result.stopped) {
           sendJson(response, 409, {
-            ...toPublicApiRequest(result.request),
+            ...toPublicApiRequest(result.request, requestBaseUrl(request)),
             error: "only accepted or running requests can be stopped"
           });
           return;
         }
-        sendJson(response, 200, toPublicApiRequest(result.request));
+        sendJson(response, 200, toPublicApiRequest(result.request, requestBaseUrl(request)));
+        return;
+      }
+
+      const videoMatch = requestUrl.pathname.match(/^\/api\/requests\/([^/]+)\/video$/);
+      if (request.method === "GET" && videoMatch) {
+        const requestId = decodeURIComponent(videoMatch[1]);
+        const apiRequest = this.database.getApiRequest(requestId);
+        if (!apiRequest?.outputVideoPath) {
+          sendJson(response, 404, { error: "verified video not found" });
+          return;
+        }
+        await sendVideoFile(request, response, apiRequest.outputVideoPath, requestId);
         return;
       }
 
@@ -279,43 +280,7 @@ class LocalApiServer {
           sendJson(response, 404, { error: "request not found" });
           return;
         }
-        sendJson(response, 200, toPublicApiRequest(apiRequest));
-        return;
-      }
-
-      if (request.method === "POST" && requestUrl.pathname === "/api/watermark/parse") {
-        const body = await readJsonBody<{ url?: string }>(request);
-        const sourceUrl = body.url?.trim();
-        if (!sourceUrl) {
-          sendJson(response, 400, { error: "url is required" });
-          return;
-        }
-        try {
-          const cleanVideoUrl = await resolveCleanVideoUrl(settings, sourceUrl, undefined, { onProviderResponse: observeWatermarkResponse, getSettings: () => this.database.getSettings() });
-          recordOperation(null, null, "独立去水印解析", "success", "已验证真实 MP4 地址", sourceUrl);
-          sendJson(response, 200, {
-            status: "success",
-            message: "去水印 MP4 地址已验证",
-            cleanVideoUrl,
-            outputVideoPath: null
-          });
-        } catch (error) {
-          recordOperation(
-            null,
-            null,
-            "独立去水印解析",
-            "failed",
-            error instanceof Error ? error.message : "去水印解析失败",
-            sourceUrl
-          );
-          sendJson(response, 422, {
-            status: "failed",
-            error: error instanceof WatermarkError ? error.info : null,
-            message: error instanceof Error ? error.message : "去水印解析失败",
-            cleanVideoUrl: null,
-            outputVideoPath: null
-          });
-        }
+        sendJson(response, 200, toPublicApiRequest(apiRequest, requestBaseUrl(request)));
         return;
       }
 
@@ -468,8 +433,7 @@ function registerIpc() {
     if (previous.apiPort !== settings.apiPort || previous.apiServiceEnabled !== settings.apiServiceEnabled || previous.apiKey !== settings.apiKey) {
       await apiServer.applySettings(settings);
     }
-    const watermarkChanged = previous.watermarkApiUrl !== settings.watermarkApiUrl || previous.watermarkApiToken !== settings.watermarkApiToken;
-    recordOperation(null, null, "保存配置", "success", watermarkChanged ? "去水印配置已保存，后续解析尝试使用新配置；已发出的请求不撤回，已失败任务可恢复结果" : "配置已保存并应用");
+    recordOperation(null, null, "保存配置", "success", "配置已保存并应用");
     return settings;
   });
 
@@ -477,7 +441,6 @@ function registerIpc() {
   ipcMain.handle("api-server:restart", async () => apiServer.applySettings(db.getSettings()));
 
   ipcMain.handle("api-requests:list", (_event, limit?: number) => db.listApiRequests(limit || 100));
-  ipcMain.handle("watermark:status", () => db.getWatermarkStatus());
   ipcMain.handle("api-requests:stats", (_event, startIso: string, endIso: string) => db.getRequestStats(startIso, endIso));
   ipcMain.handle("api-requests:recover", (_event, requestId: string) => {
     const request = db.getApiRequest(requestId);
@@ -538,6 +501,69 @@ function normalizeAspectRatio(value: unknown): DoubaoAspectRatio | null {
 function isAuthorized(request: IncomingMessage, apiKey: string) {
   if (!apiKey.trim()) return true;
   return request.headers.authorization === `Bearer ${apiKey}`;
+}
+
+function requestBaseUrl(request: IncomingMessage) {
+  const host = String(request.headers.host || "").trim();
+  if (!/^[A-Za-z0-9.[\]:-]+$/.test(host)) return undefined;
+  return `http://${host}`;
+}
+
+async function sendVideoFile(
+  request: IncomingMessage,
+  response: ServerResponse,
+  filePath: string,
+  requestId: string
+) {
+  const resolvedPath = path.resolve(filePath);
+  if (path.extname(resolvedPath).toLowerCase() !== ".mp4") {
+    sendJson(response, 404, { error: "verified video not found" });
+    return;
+  }
+
+  let stats;
+  try {
+    stats = await fs.stat(resolvedPath);
+  } catch {
+    sendJson(response, 404, { error: "verified video file is missing" });
+    return;
+  }
+  if (!stats.isFile() || stats.size < 12) {
+    sendJson(response, 404, { error: "verified video file is invalid" });
+    return;
+  }
+
+  const range = String(request.headers.range || "");
+  const match = range.match(/^bytes=(\d*)-(\d*)$/);
+  let start = 0;
+  let end = stats.size - 1;
+  let status = 200;
+  if (match) {
+    start = match[1] ? Number(match[1]) : 0;
+    end = match[2] ? Number(match[2]) : end;
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= stats.size) {
+      response.writeHead(416, { "Content-Range": `bytes */${stats.size}` });
+      response.end();
+      return;
+    }
+    end = Math.min(end, stats.size - 1);
+    status = 206;
+  }
+
+  response.writeHead(status, {
+    "Accept-Ranges": "bytes",
+    "Content-Type": "video/mp4",
+    "Content-Length": String(end - start + 1),
+    "Content-Disposition": `inline; filename="${requestId}.mp4"`,
+    ...(status === 206 ? { "Content-Range": `bytes ${start}-${end}/${stats.size}` } : {})
+  });
+  await new Promise<void>((resolve, reject) => {
+    const stream = createReadStream(resolvedPath, { start, end });
+    stream.on("error", reject);
+    response.on("close", resolve);
+    response.on("finish", resolve);
+    stream.pipe(response);
+  });
 }
 
 async function readGenerateRequest(request: IncomingMessage, requestId: string): Promise<GenerateRequestBody> {
@@ -743,7 +769,7 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(async () => {
     log.initialize();
     db = new AppDatabase();
-    executor = new DoubaoExecutor(db, notifyDataChanged, observeWatermarkResponse);
+    executor = new DoubaoExecutor(db, notifyDataChanged);
     apiServer = new LocalApiServer(db, executor);
     const queuedRequests = db.prepareQueueAfterRestart();
     quotaTimer = new DailyQuotaTimer(refreshQuotas);

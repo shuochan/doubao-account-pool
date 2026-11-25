@@ -330,6 +330,10 @@ export class AppDatabase {
         AND (? IS NULL OR id = ?)
       ORDER BY
         (SELECT COUNT(*) FROM api_requests r WHERE r.account_id = accounts.id AND r.status IN ('accepted', 'running')) ASC,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM api_requests successful
+          WHERE successful.account_id = accounts.id AND successful.status = 'success'
+        ) THEN 0 ELSE 1 END ASC,
         CASE WHEN last_used_at IS NULL THEN 0 ELSE 1 END ASC,
         last_used_at ASC,
         id ASC
@@ -1038,7 +1042,7 @@ export class AppDatabase {
       UPDATE api_requests
       SET
         status = 'failed',
-        message = '历史结果不包含有效的去水印 MP4',
+        message = '历史结果不包含有效的 MP4 文件',
         raw_video_url = NULL,
         clean_video_url = NULL,
         output_video_path = NULL,

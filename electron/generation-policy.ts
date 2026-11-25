@@ -1,4 +1,9 @@
 export const CONFIRMATION_DELAYS_MS = [60000, 120000] as const;
+export const RESPONSE_ACTIVITY_STALE_MS = 90000;
+
+export function isActiveResponseSignal(responding: boolean, now: number, lastContentChangeAt: number) {
+  return responding && now - lastContentChangeAt < RESPONSE_ACTIVITY_STALE_MS;
+}
 
 export function recoveryCandidatesForTask(preferred: string | null, candidates: string[], ownedByOthers: string[] = []) {
   const excluded = new Set(ownedByOthers);
@@ -32,7 +37,8 @@ export interface ConfirmationPolicyInput {
 export function confirmationDelayRemaining(input: ConfirmationPolicyInput) {
   if (input.accepted || input.responding || input.hasDraft || input.confirmationCount >= 2) return null;
   const delay = CONFIRMATION_DELAYS_MS[input.confirmationCount];
-  return Math.max(0, delay - (input.now - Math.max(input.stableSince, input.lastConfirmationAt)));
+  const referenceTime = input.confirmationCount > 0 ? input.lastConfirmationAt : input.stableSince;
+  return Math.max(0, delay - (input.now - referenceTime));
 }
 
 export function shouldAttemptShareRecovery(input: {

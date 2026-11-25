@@ -306,6 +306,7 @@ export function extractDoubaoFailureMessage(pageText: string) {
     /换个主题再试试[^。！？]*(?:[。！？]|$)/,
     /(?:今日|今天)(?:的)?(?:视频)?(?:生成)?(?:免费)?(?:生成)?次数(?:已经|已)?(?:用完|耗尽)[^。！？]*(?:[。！？]|$)/,
     /免费(?:视频)?(?:生成)?次数(?:已经|已)?(?:用完|耗尽)[^。！？]*(?:[。！？]|$)/,
+    /(?:今日|今天)(?:的)?(?:视频)?(?:生成)?免费额度(?:已经|已)?(?:用完|耗尽)[^。！？]*(?:[。！？]|$)/,
     /生成额度未扣除[^。！？]*(?:[。！？]|$)/,
     /额度未扣除[^。！？]*(?:[。！？]|$)/,
     /视频生成失败[^。！？]*(?:[。！？]|$)/,
@@ -496,4 +497,22 @@ export function hasNewPromptOccurrence(currentText: string, baselineText: string
 
 export function isQuotaNotChargedFailure(message: string) {
   return /额度未扣除|生成额度未扣除|未消耗|未扣费|不会扣除/.test(message);
+}
+export function extractPromptDuration(prompt: string) {
+  const text = prompt.replace(/\s+/g, " ");
+  const explicit = text.match(/(?:总?时长|视频时长|持续时间)\s*[:：]?\s*(\d+(?:\s*[-—–~至]\s*\d+)?)\s*(?:秒|s)(?![a-z])/i);
+  if (explicit?.[1]) return `${explicit[1].replace(/\s+/g, "")}秒`;
+
+  const durations = Array.from(text.matchAll(/(?<!\d)(\d+(?:\s*[-—–~至]\s*\d+)?)\s*(?:秒|s)(?![a-z])/gi))
+    .map((match) => match[1]?.replace(/\s+/g, "").replace(/\d+/g, (part) => String(Number(part))))
+    .filter((value): value is string => Boolean(value))
+    .filter((value) => value.split(/[-—–~至]/).some((part) => Number(part) > 0));
+  if (!durations.length) return null;
+
+  const duration = durations.reduce((best, value) => {
+    const max = Math.max(...value.split(/[-—–~至]/).map(Number));
+    const bestMax = Math.max(...best.split(/[-—–~至]/).map(Number));
+    return max > bestMax ? value : best;
+  });
+  return `${duration}秒`;
 }

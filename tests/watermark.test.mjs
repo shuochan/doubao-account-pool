@@ -3,6 +3,8 @@ import test from 'node:test'
 
 import {
   extractVideoUrlFromPayload,
+  extractDoubaoDirectVideoUrl,
+  isKnownWatermarkedDoubaoVideoUrl,
   getWatermarkRetryDelays,
   hasDoubaoShareVideoResource,
   isMp4VideoUrl,
@@ -26,6 +28,18 @@ test('extracts a nested MP4 result', () => {
   assert.equal(extractVideoUrlFromPayload({ data: { playUrl: url } }), url)
 })
 
+test('extracts the original MP4 from an escaped Doubao share payload', () => {
+  const html = `
+    你的视频生成好了。
+    {\\"creation_block\\":{\\"video\\":{\\"video_type\\":\\"mp4\\",
+    \\"download_url\\":\\"https:\\u002F\\u002Fcdn.example.com\\u002Fvideo.mp4?x=1\\u0026y=2\\"}}}
+  `
+  assert.equal(
+    extractDoubaoDirectVideoUrl(html),
+    'https://cdn.example.com/video.mp4?x=1&y=2',
+  )
+})
+
 test('accepts common MP4 URL formats', () => {
   assert.equal(isMp4VideoUrl('https://cdn.example.com/video?id=1&format=mp4'), true)
   assert.equal(isMp4VideoUrl('https://example.com/share/page'), false)
@@ -45,4 +59,8 @@ test('uses a short first retry and bounded backoff', () => {
   assert.deepEqual([...WATERMARK_RETRY_DELAYS_MS], [0, 5000, 15000, 30000, 60000])
   assert.deepEqual([...getWatermarkRetryDelays(3)], [0, 5000, 15000])
   assert.deepEqual([...getWatermarkRetryDelays(99)], [...WATERMARK_RETRY_DELAYS_MS])
+})
+test('distinguishes explicit Doubao watermark CDN variants', () => {
+  assert.equal(isKnownWatermarkedDoubaoVideoUrl('https://v.example/video.mp4?lr=video_gen_watermark_dyn'), true)
+  assert.equal(isKnownWatermarkedDoubaoVideoUrl('https://v.example/video_pre_watermark/video.mp4'), false)
 })

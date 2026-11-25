@@ -92,6 +92,60 @@ export async function verifyDoubaoShareVideoResource(shareUrl: string) {
   }
 }
 
+export function extractDoubaoDirectVideoUrl(html: string) {
+  const normalized = html
+    .replace(/&quot;|&#34;|&#x22;/gi, '"')
+    .replace(/&amp;/gi, "&")
+    .replace(/\\u002f/gi, "/")
+    .replace(/\\u0026/gi, "&")
+    .replace(/\\\//g, "/")
+    .replace(/\\"/g, '"');
+  const matches = Array.from(normalized.matchAll(/(?:download_url|play_url|video_url)"?\s*[:=]\s*"(https?:[^"']+)/gi));
+  for (const match of matches.reverse()) {
+    const candidate = decodeSerializedUrl(match[1]);
+    if (candidate && isMp4VideoUrl(candidate)) return candidate;
+  }
+  return null;
+}
+
+export function isKnownWatermarkedDoubaoVideoUrl(value: string) {
+  try {
+    const decoded = decodeURIComponent(value).toLowerCase();
+    return /video_gen_watermark|video_dsz(?:2)?_watermark|watermark_dyn/.test(decoded);
+  } catch {
+    return /video_gen_watermark|video_dsz(?:2)?_watermark|watermark_dyn/i.test(value);
+  }
+}
+
+export async function resolveDoubaoDirectVideoUrl(shareUrl: string) {
+  let response: Response;
+  try {
+    response = await fetch(shareUrl, {
+      headers: { "User-Agent": "Mozilla/5.0" },
+      redirect: "follow",
+      signal: AbortSignal.timeout(SHARE_PAGE_TIMEOUT_MS)
+    });
+  } catch (error) {
+    throw new Error(`豆包分享页无法访问：${errorMessage(error)}`);
+  }
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new Error(`豆包分享页无法访问：HTTP ${response.status}`);
+  }
+  const html = await response.text();
+  const directVideoUrl = extractDoubaoDirectVideoUrl(html);
+  if (!directVideoUrl) {
+    throw new Error(hasDoubaoShareVideoResource(html)
+      ? "豆包分享页包含视频，但未提取到原始 MP4 地址"
+      : "豆包分享页尚未同步原始 MP4 地址");
+  }
+  if (isKnownWatermarkedDoubaoVideoUrl(directVideoUrl)) {
+    throw new Error("豆包分享页目前只提供带水印 MP4，未发现无水印下载资源");
+  }
+  await verifyPlayableVideoUrl(directVideoUrl);
+  return directVideoUrl;
+}
+
 export async function resolveCleanVideoUrl(
   settings: AppSettings,
   shareUrl: string,
@@ -243,6 +297,14 @@ function parseJson(value: string): unknown {
     return JSON.parse(value) as unknown;
   } catch {
     return value;
+  }
+}
+
+function decodeSerializedUrl(value: string) {
+  try {
+    return JSON.parse(`"${value.replace(/"/g, '\\"')}"`) as string;
+  } catch {
+    return value.replace(/\\u002f/gi, "/").replace(/\\u0026/gi, "&").replace(/\\\//g, "/");
   }
 }
 

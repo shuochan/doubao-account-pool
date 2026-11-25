@@ -13,6 +13,7 @@ import {
   extractNewDoubaoReply,
   extractDoubaoShareUrl,
   extractDoubaoWatermarkShareUrl,
+  extractPromptDuration,
   getNewDoubaoVideoUrls,
   hasStrongSubmissionEvidence,
   hasNewDoubaoSubmissionConfirmation,
@@ -32,6 +33,12 @@ import {
   isQuotaNotChargedFailure,
   promptSignature,
 } from '../dist-electron/doubao-page-state.js'
+
+test('extracts the intended duration instead of trailing storyboard timecodes', () => {
+  assert.equal(extractPromptDuration('制作14秒视频，分镜 00秒 画面开始，07秒 转场，00秒 字幕'), '14秒')
+  assert.equal(extractPromptDuration('视频时长：10秒，00秒开始'), '10秒')
+  assert.equal(extractPromptDuration('00秒开始，05秒结束'), '5秒')
+})
 
 test('detects Doubao infringement and violation failures', () => {
   const text = '生成内容中疑似包含侵权 / 违规内容，无法返回该内容，换个主题再试试，生成额度未扣除。'
@@ -214,6 +221,7 @@ test('detects the exhausted daily free generation quota message', () => {
   assert.equal(extractDoubaoFailureMessage('今日免费生成次数已用完，明天再来吧。'), '今日免费生成次数已用完，明天再来吧。')
   assert.equal(extractDoubaoFailureMessage('今日生成次数已用完。'), '今日生成次数已用完。')
   assert.equal(extractDoubaoFailureMessage('免费生成次数已用完，请明天再试。'), '免费生成次数已用完，请明天再试。')
+  assert.equal(extractDoubaoFailureMessage('今日视频生成免费额度已用完。开通订阅畅享更多额度。'), '今日视频生成免费额度已用完。')
   assert.equal(isQuotaNotChargedFailure('今日视频生成免费次数已用完'), false)
 })
 

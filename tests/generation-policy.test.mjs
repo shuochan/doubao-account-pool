@@ -7,7 +7,7 @@ test('pins a known task conversation and excludes conversations owned by other r
   assert.deepEqual(recoveryCandidatesForTask(null, ['legacy', 'other', 'legacy'], ['other']), ['legacy'])
   assert.deepEqual(recoveryCandidatesForTask('other', ['legacy'], ['other']), [])
 })
-import { confirmationDelayRemaining, hasFormalGenerationAcknowledgement, hasNewFormalGenerationAcknowledgement, shouldAttemptShareRecovery } from '../dist-electron/generation-policy.js'
+import { confirmationDelayRemaining, hasFormalGenerationAcknowledgement, hasNewFormalGenerationAcknowledgement, isActiveResponseSignal, shouldAttemptShareRecovery } from '../dist-electron/generation-policy.js'
 
 test('does not accept the actual 003/004 text-only promises as a running video', () => {
   for (const text of [
@@ -33,6 +33,7 @@ test('waits 60 seconds for the first confirmation and 120 for the second', () =>
   assert.equal(confirmationDelayRemaining({ ...policy, now: 61000 }), 0)
   assert.equal(confirmationDelayRemaining({ ...policy, now: 62000, lastConfirmationAt: 61000, confirmationCount: 1 }), 119000)
   assert.equal(confirmationDelayRemaining({ ...policy, now: 181000, lastConfirmationAt: 61000, confirmationCount: 1 }), 0)
+  assert.equal(confirmationDelayRemaining({ ...policy, now: 181000, stableSince: 180999, lastConfirmationAt: 61000, confirmationCount: 1 }), 0)
 })
 
 test('never follows up over a native task, a streaming response, a manual draft, or two confirmations', () => {
@@ -41,6 +42,12 @@ test('never follows up over a native task, a streaming response, a manual draft,
   }
   assert.equal(confirmationDelayRemaining({ ...policy, now: 150000, stableSince: 149000 }), 59000)
   assert.equal(confirmationDelayRemaining({ ...policy, now: 150000, confirmationCount: 1, lastConfirmationAt: 149000 }), 119000)
+})
+
+test('a stale stop-response signal does not block bounded confirmation forever', () => {
+  assert.equal(isActiveResponseSignal(true, 89999, 0), true)
+  assert.equal(isActiveResponseSignal(true, 90000, 0), false)
+  assert.equal(isActiveResponseSignal(false, 1, 0), false)
 })
 
 test('continues bounded share recovery after two minutes instead of ending a generated task', () => {
