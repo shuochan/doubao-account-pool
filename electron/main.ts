@@ -10,6 +10,7 @@ import { doubaoDailyQuotaError } from "./doubao-quota-state.js";
 import log from "electron-log/main.js";
 import { AppDatabase } from "./database.js";
 import { DoubaoExecutor } from "./executor.js";
+import { enableSilentVideoDownloads } from "./video-download.js";
 import { toPublicApiRequest } from "./public-api.js";
 import type {
   AccountUpdateInput,
@@ -331,6 +332,7 @@ function createDoubaoWindow(accountId: number) {
     }
   });
 
+  enableSilentVideoDownloads(win, () => db.getSettings().outputDir);
   void win.loadURL("https://www.doubao.com/chat");
 }
 
